@@ -1,0 +1,362 @@
+var khumbuextent = ee.FeatureCollection("users/Charisse_Hanson/Nepal/KhumbuExtent");
+
+
+Map.addLayer(khumbuextent, {}, 'khumbu');
+Map.addLayer(dem.visualize(), {min: 0, max: 500}, "dem");
+print (dem);
+
+
+Map.setCenter(86.7487, 27.8529);
+Map.setZoom(13);
+//Map.addLayer(extent, {}, 'extent');
+
+var visParams = {bands: ['B4', 'B3', 'B2'], min:0,max: 3500}; //True color
+
+    
+var imgColSummer = ee.ImageCollection('COPERNICUS/S2_SR')
+      .filterDate('2019-05-01', '2019-09-01')
+      .filterBounds(roi);
+print(imgColSummer);
+
+//Summer
+var imgColListSummer = imgColSummer.toList(25);
+for (var i = 0; i < 25; i++) {
+  var img = ee.Image(imgColListSummer.get(i));
+  print(img);
+  var systemIndex = img.get('system:index').getInfo();
+  Map.addLayer(img.clip(extent), visParams, systemIndex, false);
+}
+
+var summer = ee.Image('COPERNICUS/S2_SR/20190702T044709_20190702T050011_T45RVL').clip(extent);
+//20190702 - best image
+
+
+var imgColWinter = ee.ImageCollection('COPERNICUS/S2_SR')
+      .filterDate('2019-11-01', '2020-03-01')
+      .filterBounds(roi);
+      
+print(imgColWinter);
+//Winter
+var imgColList = imgColWinter.toList(25);
+// for (var i = 0; i < 25; i++) {
+//   var img = ee.Image(imgColList.get(i));
+//   print(img);
+//   var systemIndex = img.get('system:index').getInfo();
+//   Map.addLayer(img.clip(extent), visParams, systemIndex, false);
+// }
+
+var winter = ee.Image('COPERNICUS/S2_SR/20200113T045131_20200113T045526_T45RVL').clip(extent);
+//20200113 - winter image
+
+//Cloud, cloud shadow, snow masking
+var cld = require('users/fitoprincipe/geetools:cloud_masks');
+
+var summer = cld.sclMask(['cloud_low', 'cloud_medium', 'cloud_high', 'shadow', 'cirrus', 'snow'])(summer);
+
+var winter = cld.sclMask(['cloud_low', 'cloud_medium', 'cloud_high', 'shadow', 'cirrus', 'snow'])(winter);
+
+
+//Mask the winter and summer so that the same area is being evaluated
+
+Map.addLayer(summer, visParams, 'summer_before_winter_mask', false);
+var summer1 = summer.updateMask(winter);
+Map.addLayer(summer1, visParams, 'summer_after_winter_mask', false);
+
+Map.addLayer(winter, visParams, 'winter_before_summer_mask', false);
+var winter1 = winter.updateMask(summer);
+Map.addLayer(winter1, visParams, 'winter_after_summer_mask', false);
+
+
+//Define root panel for histograms
+var panel = ui.Panel({style: {width: '500px'}})
+    .add(ui.Label('NDVI Analysis'));
+
+
+
+//Start summer processing - 
+
+Map.addLayer(summer1, visParams, 'summer', false);
+// Map.addLayer(summer1.select(['B2']), {bands: ['B2'], min:0,max: 3500, palette: ['white','blue']}, 'summer_B2');
+// Map.addLayer(summer1.select(['B3']), {bands: ['B3'], min:0,max: 3500, palette: ['white','green']}, 'summer_B3');
+// Map.addLayer(summer1.select(['B4']), {bands: ['B4'], min:0,max: 3500, palette: ['white','red']}, 'summer_B4');
+// Map.addLayer(summer1.select(['B8']), {bands: ['B8'], min:0,max: 3500, palette: ['white','red']}, 'summer_B8_NIR');
+
+var ndvi = summer1.normalizedDifference(['B8','B4']).rename('ndvi_summer');
+summer1 = summer1.addBands(ndvi);
+
+Map.addLayer(summer1.select(['ndvi_summer']), {bands: ['ndvi_summer'], min:-1, max: 1, palette: ['brown','yellow','green']}, 'summer_ndvi');
+
+var ndviHistSumm = ui.Chart.image.histogram(summer1.select(['ndvi_summer']), extent, 30)
+    .setSeriesNames(['ndvi_summer'])
+    .setOptions({
+      title: 'ndvi - summer',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'green'}
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(3, ndviHistSumm);
+
+
+//Process winter 
+
+Map.addLayer(winter1, visParams, 'winter', false);
+// Map.addLayer(winter1.select(['B2']), {bands: ['B2'], min:0,max: 3500, palette: ['white','blue']}, 'winter_B2');
+// Map.addLayer(winter1.select(['B3']), {bands: ['B3'], min:0,max: 3500, palette: ['white','green']}, 'winter_B3');
+// Map.addLayer(winter1.select(['B4']), {bands: ['B4'], min:0,max: 3500, palette: ['white','red']}, 'winter_B4');
+// Map.addLayer(winter1.select(['B8']), {bands: ['B8'], min:0,max: 3500, palette: ['white','red']}, 'winter_B8_NIR');
+
+var ndvi = winter1.normalizedDifference(['B8','B4']).rename('ndvi_winter');
+winter1 = winter1.addBands(ndvi);  //add both winter ndvi and summer ndvi
+
+
+
+Map.addLayer(winter1.select(['ndvi_winter']), {bands: ['ndvi_winter'], min:-1, max: 1, palette: ['brown','yellow','green']}, 'winter_ndvi');
+
+var ndviHistWint = ui.Chart.image.histogram(winter1.select(['ndvi_winter']), extent, 30)
+    .setSeriesNames(['ndvi_winter'])
+    .setOptions({
+      title: 'ndvi - winter',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'green'}
+        
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(3, ndviHistWint);
+
+
+//combined
+var combined = winter1.addBands(summer1.select(['ndvi_summer'])); 
+
+//Plot combined ndvi
+var ndviHistComb = ui.Chart.image.histogram(combined.select(['ndvi_winter', 'ndvi_summer']), extent, 30)
+    .setSeriesNames(['ndvi_winter', 'ndvi_summer'])
+    .setOptions({
+      title: 'ndvi - winter and summer',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'brown'},
+        1: {color: 'blue'}
+        
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(3, ndviHistComb);
+
+ui.root.add(panel);
+
+//print datatable of combined histogram
+// var dataTable = ndviHistComb.getDataTable();
+// print('dataTable',dataTable)
+
+
+//Threshold to check 0.36 - based on reviewing the histogram where they cross
+
+//create a summer mask based on the threshold to find the min, max and median ndvi values for 'hi veg'
+
+var summer_hi_veg = combined.select(['ndvi_summer']).gt(0.36).rename('summer_hi_veg');
+combined = combined.addBands(summer_hi_veg);
+
+var masked_using_summer_hi_veg = combined.updateMask(combined.select(['summer_hi_veg']));
+Map.addLayer(masked_using_summer_hi_veg, {bands: ['summer_hi_veg'], min:-1, max: 1, palette: ['brown','yellow','green']}, "summer_ndvi_36", false);
+
+//Get min and max for masked summer_hi_veg
+
+var hi_veg_min = masked_using_summer_hi_veg
+    .reduceRegion({
+      reducer: ee.Reducer.min(),
+      geometry: extent,  // a geometry
+      scale: 30,   
+      maxPixels: 1e9  
+    });
+print('hi_veg_mask - summer_min',hi_veg_min.get('ndvi_summer')); 
+print('hi_veg_mask - winter_min',hi_veg_min.get('ndvi_winter'));  
+
+var hi_veg_max = masked_using_summer_hi_veg
+    .reduceRegion({
+      reducer: ee.Reducer.max(),
+      geometry: extent,  // a geometry
+      scale: 30,   
+      maxPixels: 1e9  
+    });
+print('hi_veg_mask - summer_max',hi_veg_max.get('ndvi_summer')); 
+print('hi_veg_mask - winter_max',hi_veg_max.get('ndvi_winter'));  
+
+
+//using the median to not be affected by outliers
+var hi_veg_median = masked_using_summer_hi_veg
+    .reduceRegion({
+      reducer: ee.Reducer.median(),
+      geometry: extent,  // a geometry
+      scale: 30,   
+      maxPixels: 1e9  
+    });
+print('hi_veg_mask - summer_median',hi_veg_median.get('ndvi_summer')); 
+print('hi_veg_mask - winter_median',hi_veg_median.get('ndvi_winter')); 
+
+
+
+//Rate of Difference = 
+var ndviDiffThresh = ee.Number(hi_veg_median.get('ndvi_summer')).subtract(ee.Number(hi_veg_median.get('ndvi_winter')));
+print('ndviDiffThresh', ndviDiffThresh); 
+
+//Create a mask where the absolute difference between winter and summer is greater 
+//than or equal to 0.27 for the pixel for the "hi_veg" areas ( > 0.36 threshold)
+
+print(masked_using_summer_hi_veg);
+var deciForestMaskVal = (combined.select(['ndvi_summer'])
+                  .subtract(combined.select(['ndvi_winter'])))
+                  .gte(ndviDiffThresh).rename('deci_forest_mask');
+
+combined = combined.addBands(deciForestMaskVal);
+
+print(combined);
+
+var deciForest = combined.updateMask(deciForestMaskVal);
+
+//Display deciduous forest mask
+Map.addLayer(deciForest, {bands: ['deci_forest_mask'], min:-1, max: 1, palette: ['red']}, "deci_forest_mask");
+
+//Get min values for deci forest mask
+// var deci_mask_min = deciForest
+//     .reduceRegion({
+//       reducer: ee.Reducer.min(),
+//       geometry: extent,  // a geometry
+//       scale: 30,   
+//       maxPixels: 1e9  
+//     });
+// print(deci_mask_min);
+
+                  
+//Add ground truth forest ============= OLD TRAINING DATA
+//var khumbuTrain = ee.FeatureCollection("users/larsb/KhumbuTraining");
+// var khumbuTrain = ee.FeatureCollection("users/Charisse_Hanson/Nepal/KhumbuTraining");
+// print('khumbuTrain',khumbuTrain);
+// var forestKhumbuTrain = khumbuTrain.filter(ee.Filter.inList('Class', ['Forest']));
+// print('khumbuTrain - Forest only',forestKhumbuTrain);
+// Map.addLayer(forestKhumbuTrain, {}, 'forest_ground_truth');    
+
+
+var ndviDiff = combined.select(['ndvi_summer']).subtract(combined.select(['ndvi_winter']));
+
+var diff_min = ndviDiff
+    .reduceRegion({
+      reducer: ee.Reducer.min(),
+      geometry: extent,  // a geometry
+      scale: 30,   
+      maxPixels: 1e9  
+    });
+print(diff_min);
+
+var diff_max = ndviDiff
+    .reduceRegion({
+      reducer: ee.Reducer.max(),
+      geometry: extent,  // a geometry
+      scale: 30,   
+      maxPixels: 1e9  
+    });
+print(diff_max);
+
+Map.addLayer(ndviDiff, {min:-1, max: 1.6, palette: ['white','yellow','green']}, 'ndvi_diff', false);
+
+
+//=============================
+//Print the new training data
+
+var khumbuExt = ee.FeatureCollection("users/Charisse_Hanson/Nepal/KhumbuExtent");
+Map.addLayer(khumbuExt, {}, "khumbu_ext_old");
+
+var khumbuExt1 = ee.FeatureCollection("users/Charisse_Hanson/KhumbuExtent1");
+Map.addLayer(khumbuExt1, {}, "khumbu_ext_new");
+print(khumbuExt1);
+
+var khumbuTrain1 = ee.FeatureCollection("users/Charisse_Hanson/LandcoverTrainingPolygons2");
+Map.addLayer(khumbuTrain1, {palette: ['blue']}, "khumbu_training_new");
+print(khumbuTrain1);
+
+
+
+//===================
+//Training
+
+/*
+*Will not use subsampling (randomColumn function) - training dataset is exclusively for training
+*A different dataset will be constructed for validation/testing
+*RETURN: Classifiers
+*/
+function trainClassification(img, bands, trainFC, partition) {
+  
+  // Partition to training and testing data
+  var withRandom = trainFC.randomColumn('random',1);
+  var trainingP = withRandom.filter(ee.Filter.lt('random', partition));
+  var testingP = withRandom.filter(ee.Filter.gte('random', partition));  
+  
+  //Create training data set
+  var trainingData = img.select(bands).sampleRegions({
+    collection: trainingP,
+    properties: ['landcover'],
+    scale: 30 
+  });
+  
+  //Use 10 decision trees, seed 1, else default values
+  var classifier = ee.Classifier.smileRandomForest(10, null, 1, 0.5, null, 1).train({
+    features: trainingData,
+    classProperty: 'landcover',
+    inputProperties: bands
+  });
+  // print('classifier', classifier)
+  
+  
+  //Check resubstitution accuracy for the trained classifier
+  var trainingAcc = classifier.confusionMatrix();
+
+    print("[TRN] Confusion Matrix: ", trainingAcc,
+          "[TRN] Overall Accuracy: ", trainingAcc.accuracy(),
+          "[TRN] Consumer Accuracy: ", trainingAcc.consumersAccuracy(),
+          "[TRN] Producer Accuracy: ", trainingAcc.producersAccuracy(),
+          "[TRN] kappa: ", trainingAcc.kappa());
+
+  //Create validation data set
+  var validationData = img.select(bands).sampleRegions({
+    collection: testingP,
+    properties: ['landcover'],
+    scale: 30 
+  });
+  // print(validationData);
+  
+  var validationAcc = validationData.errorMatrix('landcover', 'classification');
+
+    print("[VAL] Confusion Matrix: ", validationAcc,
+          "[VAL] Overall Accuracy: ", validationAcc.accuracy(),
+          "[VAL] Consumer Accuracy: ", validationAcc.consumersAccuracy(),
+          "[VAL] Producer Accuracy: ", validationAcc.producersAccuracy(),
+          "[VAL] kappa: ", validationAcc.kappa());
+
+  
+  //Array of accuracy assessment confusion matrices
+  var accObjs = [trainingAcc, validationAcc];
+  
+  return accObjs;
+}
+
