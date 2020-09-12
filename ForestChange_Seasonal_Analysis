@@ -1,0 +1,158 @@
+/**
+ * Method 1: Using RandomForest supervised classification.
+ * Using previously provided training dataset.
+ * Landsat8 data, summer (6/1/2019 to 7/31/2019) and winter (12/1/2019-01/31/2020)
+ * Task: Using classified images to model vegetation changes between winter and summer season
+ * Center point: 86.7487, 27.8529
+ */
+ 
+// Import training data and extent
+var centerPt = ee.Geometry.Point(86.7487, 27.8529);
+var khumbuExtent = ee.FeatureCollection("users/Charisse_Hanson/Nepal/KhumbuExtent");
+var khumbuTrain = ee.FeatureCollection("users/Charisse_Hanson/Nepal/KhumbuTraining");
+var visParams = {bands: ['B4', 'B3', 'B2'], min:0,max: 5000};
+
+//START Original code -------------------------------------------------------------------------
+// Add Landsat image
+//original
+var l8 = ee.Image('LANDSAT/LC08/C01/T1_SR/LC08_140041_20181211').float().clip(khumbuExtent);
+
+//Winter image? (from LarsScript2)
+//var l8 = ee.Image('LANDSAT/LC08/C01/T1_SR/LC08_140041_20190301').float().clip(khumbuExtent);
+
+
+//Add to map - 2018 starting landsat8 image
+Map.addLayer(l8, visParams, 'orig_l8_2018');
+
+// Use these bands for prediction.
+var bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10', 'B11'];
+
+// This property of the table stores the land cover labels.
+var label = 'Landcover';
+
+// Partition to training and testing data
+var withRandom = khumbuTrain.randomColumn('random',1);
+var split = 0.7;  // Roughly 70% training, 30% testing.
+var trainingP = withRandom.filter(ee.Filter.lt('random', split));
+var testingP = withRandom.filter(ee.Filter.gte('random', split));
+
+// Overlay the points on the imagery to get training.
+var training = l8.select(bands).sampleRegions({
+  collection: trainingP,
+  properties: [label],
+  scale: 30
+});
+
+// Overlay the points on the imagery to get training.
+var testing = l8.select(bands).sampleRegions({
+  collection: testingP,
+  properties: [label],
+  scale: 30
+});
+
+// Create display
+var l8display = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000,
+  gamma: 1.4,
+};
+
+// Define a palette for the Land Use classification.
+var palette = [
+  'red', // urban (1)
+  'green', // forest (2)
+  'lawngreen', //  grass (3)
+  'grey', // gravel (4)
+  'blue' // water (5)
+];
+
+// Classify random forest
+var trainedrandom = ee.Classifier.randomForest().train({
+  features: training,
+  classProperty: 'Landcover',
+  inputProperties: bands
+});
+var classifiedrandom = l8.select(bands).classify(trainedrandom);
+
+Map.addLayer(classifiedrandom, {min: 1, max: 5, palette: palette}, '2018_L8_Winter');
+print(classifiedrandom);
+
+// Get a confusion matrix representing resubstitution accuracy.
+var trainAccuracy = trainedrandom.confusionMatrix();
+print('RF error matrix: ', trainAccuracy);
+print('Training overall accuracy: ', trainAccuracy.accuracy());
+print('Consumer accuracy: ', trainAccuracy.consumersAccuracy());
+print('Producer accuracy: ', trainAccuracy.producersAccuracy());
+print('kappa: ', trainAccuracy.kappa());
+
+// Classify the validation data.
+var validated = testing.classify(trainedrandom);
+print(validated);
+
+// Get a confusion matrix representing expected accuracy.
+var testAccuracy = validated.errorMatrix('Landcover', 'classification'); 
+print('Validation error matrix: ', testAccuracy);
+print('Validation overall accuracy: ', testAccuracy.accuracy());
+
+//END Original code -------------------------------------------------------------------------
+
+
+// Define visual display parameters
+var l8display2019 = {bands:['B4','B3','B2'], min:0, max:5000};
+    
+//This is problematic.... might have to look at sentinel data     
+//Mask clouds
+var mask = require('users/fitoprincipe/geetools:cloud_masks');
+var mask_Fn = mask.landsatSR(['cloud','snow']);
+  
+
+//Function to apply classification    
+var classify = function(layerName, displayParms, fromDate, toDate) {
+  
+  //Build landsat8 collection for the classification  
+  var imageCol = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR")
+    .filterDate(fromDate, toDate)
+    .filterBounds(centerPt)
+    .sort('CLOUD_COVER',false);
+  
+  //Add masked layer for visual validation
+  Map.addLayer(imageCol.map(mask_Fn).max(), displayParms, layerName+'_cloud_rmvd', false);  
+  
+  //Apply trained classifier to 2019 summer landcover (mean composite of image collection)
+  var classified = ee.Image(imageCol.max()).float().clip(khumbuExtent)
+        .select(bands).classify(trainedrandom);
+        
+  Map.addLayer(classified, {min: 1, max: 5, palette: palette}, layerName);
+  //print(layerName + ' --- ' + classified);
+  
+  //Apply mask to calculate 'forest' pixels = 2
+  //TODO: Something wrong with classification... use grass for now (3)
+  var maskNonForest = classified.eq(3);
+  classified = maskNonForest.updateMask(maskNonForest);
+  Map.addLayer(classified, {palette: ['green']}, layerName+'_Forest_Masked');
+  
+  //Use reduce to count forest pixels
+  var totalForestPixels = classified.reduceRegion({
+    reducer: ee.Reducer.count(),
+    geometry: khumbuExtent,
+    scale: 30,  //# of meters per pixel, per landsat8
+    maxPixels: 1e9
+  });
+  
+  //Need to split this to two lines... referencing is breaking somehow in the print....
+  print(layerName + " - Total Forest Pixels: " );
+  print(totalForestPixels.get('classification'));
+  
+}    
+    
+    
+//Print forest coverage difference    
+//Summer 2019 in Nepal    
+classify('ls8_2019_Summer', l8display2019, '2019-05-01', '2019-08-30');
+
+//Winter 2019 in Nepal    
+classify('ls8_2019_Winter', l8display2019, '2019-12-01', '2020-02-28');
+
+
+
