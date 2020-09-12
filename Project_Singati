@@ -1,0 +1,536 @@
+/*
+*Date: July 23, 2020
+*Author: Charisse Hanson
+*
+*Project: (GEE) Time-series analysis of Singati, Nepal (Summer 2013-2019) vegetation 
+*changes using NDVI-enhanced supervised classification methodology
+*
+*Summary: This project examines if landcover supervised classification can be improved through
+*the addition of the NDVI band. The accuracy of supervised classification w/ NDVI and w/o NDVI
+*are compared and the higher accuracy classifier is used for landcover classification
+*for the 2013 to 2019 summer periods over Singati, Nepal, using Landsat 8, T1 SR dataset.
+*Vegetation changes are explored using time-series analysis of NDVI mean and forest landcover. 
+*/
+
+
+//Center map over Singati, Nepal
+Map.setCenter(86.16742785326868,27.759086429679762);
+
+//Set zoom level
+Map.setZoom(13);
+
+//Define global variables for project
+var gClassifier = null;
+var gUseNDVI = false;
+var gMinYear = 2013;
+var gMaxYear = 2019;
+var gStartDate = ee.Date('2013-05-01');
+var gEndDate = ee.Date('2019-09-01');
+var gValKappa = 0.0;
+var gCollection = null;
+var gBands = bands_woNDVI; //default, no NDVI
+var maxNum = gMaxYear-gMinYear+1;
+
+
+//Palette for classified images
+var paletteClasses = ['#1e79ce',    //water - 0
+                      '#a73a56',    //settlement - 1
+                      '#d4ff60',    //shrubs - 2
+                      '#328b25',    //forest - 3
+                      '#cacaca'];   //other - 4  
+
+//Classes dictionary                    
+var classDict = { 0: "Water",
+                  1: "Settlement",
+                  2: "Shrubs",
+                  3: "Forest",
+                  4: "Other"  };
+
+//Default visual parameters for map layers, true color
+var visParams = {bands: ['B4', 'B3', 'B2'], min: 0, max: 3000, gamma: 1}; 
+
+//Default visual parameters for NDVI map layers
+var visParamsNDVI = {bands: ['NDVI'], palette: ['brown','yellow', paletteClasses[3]], min: -0.2, max: 1};
+
+//Bands used for training (no NDVI)
+var bands_woNDVI = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10', 'B11'];
+
+//Bands used for training (with NDVI)
+var bands_wNDVI = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'NDVI'];
+
+//Merge landcover feature collections for training
+var trainingFC = water.merge(shrub_lo_veg).merge(forest_hi_veg).merge(urban_no_veg).merge(other);
+
+//Merge landcover feature collections for validation
+var validationFC = v_water.merge(v_shrub_lo_veg).merge(v_forest_hi_veg).merge(v_urban_no_veg).merge(v_other);
+
+
+/*
+*Build the image collection using Landsat 8 T1_SR for a range of years
+*Filter the image with the least cloud cover in the period May-1(5) to September-1(9)
+*RETURN: ImageCollection
+*/
+function buildImgCol(minYear, maxYear) {
+  
+  var imgList = ee.List.sequence(minYear, maxYear);
+
+  return ee.ImageCollection(imgList.map(function(yr) {
+    
+    var startDate = ee.Date.fromYMD(yr, 5, 1);
+    var endDate = ee.Date.fromYMD(yr, 9, 1);
+    var img = ee.Image(ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')
+      .filterDate(startDate, endDate)
+      .filterBounds(roi)
+      .sort('CLOUD_COVER')
+      .first()).clip(singatiExtent);
+      
+    return img;  
+    }));
+}
+
+
+/*
+*GEE team provided code for cloud masking
+*RETURN: Masked image
+*/
+function maskL8sr(img) {
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  var cloudShadowBitMask = 1 << 3;
+  var cloudsBitMask = 1 << 5;
+
+  // Get the pixel QA band.
+  var qa = img.select('pixel_qa');
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+      .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+
+  // Return the masked image, scaled to reflectance, without the QA bands.
+  return img.updateMask(mask);
+}
+
+
+/*
+*Build NDVI band to all images in the image collection 
+*RETURN: ImageCollection of images with NDVI band
+*/
+function addNDVIBandToImgCol(imgCol) {
+  
+  var imgColNDVI = imgCol.map(function(img) {
+    
+    var ndvi = img.normalizedDifference(['B5', 'B4']).rename('NDVI');
+    
+    img = img.addBands(ndvi);
+    
+    return img;
+  });
+  
+  return imgColNDVI;
+}
+
+
+/*
+*Will not use subsampling (randomColumn function) - training dataset is exclusively for training
+*A different dataset will be constructed for validation/testing
+*RETURN: Classifier
+*/
+function trainClassification(img, withNDVI, trainFC) {
+  
+  //Set bands value if processing with NDVI
+  var bands = bands_woNDVI;
+  if (withNDVI) bands = bands_wNDVI;
+  
+  //Create training data set
+  var trainingData = img.select(bands).sampleRegions({
+    collection: trainingFC,
+    properties: ['landcover'],
+    scale: 30 
+  });
+  
+  //Use 10 decision trees, seed 1, else default values
+  var classifier = ee.Classifier.smileRandomForest(10, null, 1, 0.5, null, 1).train({
+    features: trainingData,
+    classProperty: 'landcover',
+    inputProperties: bands
+  });
+  // print('classifier', classifier)
+  
+  return classifier;
+}
+
+
+/*
+*Do accuracy assessment of the classification
+*Check for resubstitution accuracy of the classifier against training dataset
+*Validate accuracy of classified image against validation dataset 
+*Validation dataset groundtruthed using Google Earth and Sentinel-2 higher resolution imagery
+*DO NOT SET "toPrint"=true IF RUNNING AS A MAPPED FUNCTION - SERVER SIDE WILL ERROR
+*RETURN: Array of confusion matrix
+*/
+function doAccuracyAssessment(classifier, classifiedImg, toPrint) {
+  
+  //Check resubstitution accuracy for the trained classifier
+  var trainingAcc = classifier.confusionMatrix();
+  if (toPrint) {
+    print("[TRN] Confusion Matrix: ", trainingAcc,
+          "[TRN] Overall Accuracy: ", trainingAcc.accuracy(),
+          "[TRN] Consumer Accuracy: ", trainingAcc.consumersAccuracy(),
+          "[TRN] Producer Accuracy: ", trainingAcc.producersAccuracy(),
+          "[TRN] kappa: ", trainingAcc.kappa());
+  }
+
+  //Create validation data set
+  var validationData = classifiedImg.sampleRegions({
+    collection: validationFC,
+    properties: ['landcover'],
+    scale: 30 
+  });
+  // print(validationData);
+  
+  var validationAcc = validationData.errorMatrix('landcover', 'classification');
+  if (toPrint) {
+    print("[VAL] Confusion Matrix: ", validationAcc,
+          "[VAL] Overall Accuracy: ", validationAcc.accuracy(),
+          "[VAL] Consumer Accuracy: ", validationAcc.consumersAccuracy(),
+          "[VAL] Producer Accuracy: ", validationAcc.producersAccuracy(),
+          "[VAL] kappa: ", validationAcc.kappa());
+  }
+  
+  //Array of accuracy assessment confusion matrices
+  var accObjs = [trainingAcc, validationAcc];
+  
+  return accObjs;
+}
+
+
+/* 
+*This function converts the classification classes to individual bands
+*See classDict object
+*RETURN: Classified image with class bands
+*/
+function addClassesAsBands(classifiedImg) {
+  
+  var bandsList = [];
+  
+  for (var i = 0; i < 5; i++) {
+    var classType = classifiedImg.eq(i).rename(classDict[i]);
+    
+    //mask all other pixels not equal to this class
+    classType = classType.updateMask(classType); 
+    
+    //Add new band to list
+    bandsList.push(classType);
+  }
+  
+  return classifiedImg.addBands(bandsList);
+}
+
+
+/* 
+*Uses the reduceRegion to sum the pixels by class to get the total area by class
+*RETURN: Classified image with "AreasByClass" property
+*/
+function getAreasByClass(classifiedImg) {
+  
+  var areas = classifiedImg.select([classDict[0], classDict[1], classDict[2], classDict[3], classDict[4]])
+    .multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: singatiExtent,  // a geometry
+      scale: 30,   
+      maxPixels: 1e9  
+    });
+  
+  //Set the areas dictionary as a property to this image
+  return classifiedImg.set("AreasByClass", areas);
+}
+
+
+
+
+//=========================================================================================
+//MAIN=====================================================================================
+//=========================================================================================
+
+
+//Build image collection for timeframe of study
+//Add the NDVI band to each image in the collection
+var collection = buildImgCol(gMinYear, gMaxYear);
+gCollection = addNDVIBandToImgCol(collection);
+print("Starting Image Collection with NDVI", gCollection);
+
+
+//Use most recent image to build the classifier
+var trainingImg = ee.Image(gCollection.sort('SENSING_TIME', false).first());
+Map.addLayer(trainingImg, visParams, 'trainingImg_TRUECOLOR');
+Map.addLayer(trainingImg, visParamsNDVI, 'trainingImg_NDVI');
+
+
+/*
+*Test case array - is adding NDVI to classification more accurate?
+*Test scenarios, then save classification with highest accuracy to globals
+*Client-side for-loop
+*/
+var testCasesNDVI = [false, true];
+for (var i = 0; i < testCasesNDVI.length; i++) {
+  
+  var temp_useNDVI = testCasesNDVI[i];
+  var temp_bands = bands_woNDVI;
+  if (temp_useNDVI) temp_bands = bands_wNDVI; //If using NDVI, use bands variable with NDVI band
+  
+  //Use last image, most recent in the collection for supervised classification 
+  var temp_classifier = trainClassification(trainingImg, temp_useNDVI, trainingFC);
+  var temp_classified = trainingImg.select(temp_bands).classify(temp_classifier);
+  Map.addLayer(temp_classified, {min:0, max:4, palette: paletteClasses}, 'temp_classified_NDVI='+temp_useNDVI);
+  
+  //Check accuracy assessment of this classification, do not print TRN and VAL print statements
+  var accObjs = doAccuracyAssessment(temp_classifier, temp_classified, false);
+  print("Test Case "+(i+1)+") Using NDVI=", temp_useNDVI,
+        "[TRN] Overall Accuracy: ", accObjs[0].accuracy(),
+        "[TRN] kappa: ", accObjs[0].kappa(),
+        "[VAL] Overall Accuracy: ", accObjs[1].accuracy(),
+        "[VAL] kappa: ", accObjs[1].kappa());
+  
+  //Set global variable values for classification if this classification returned higher val kappa
+  if (accObjs[1].kappa().gt(gValKappa)) {
+    gValKappa = accObjs[1].kappa();
+    gClassifier = temp_classifier;
+    gUseNDVI = temp_useNDVI;
+    gBands = temp_bands;
+  }
+}
+
+
+//Print results of test cases
+print("==Classification Test Case Results==\n" +
+      "\nHigher accuracy with NDVI band: ", gUseNDVI, 
+      "\nClassification VAL kappa: ", gValKappa,
+      "\nBands to use for image classification: ", gBands);
+
+
+//Classify the image collection using the global classifier
+var classifiedCol = gCollection.map(function(img) {
+  return img.select(gBands).classify(gClassifier);
+});
+
+
+//Add classes as bands to the classified image collection
+classifiedCol = classifiedCol.map(addClassesAsBands);
+
+
+//Get the total area for each class in the classified image
+classifiedCol = classifiedCol.map(getAreasByClass);
+print("Classified Collection With Areas by Class", classifiedCol);
+
+
+//Cast to list for post-processing
+var classifiedColList = classifiedCol.toList(maxNum);
+var gCollectionList = gCollection.toList(maxNum);
+
+
+/*
+*Add the bands and class areas from classified images to the original images
+*Add year of img capture as a property
+*This will be used for charting
+*/
+var imgList = [];
+for (var i = 0; i < maxNum; i++) {
+  
+  var gColImg = ee.Image(gCollectionList.get(i));
+  var classColImg = ee.Image(classifiedColList.get(i));
+  
+  var gc_index = gColImg.get('system:index');
+  var cc_index = classColImg.get('system:index');
+  var areas = classColImg.get('AreasByClass');
+
+  if (ee.Algorithms.IsEqual(gc_index, cc_index)) {
+    gColImg = gColImg.addBands(classColImg);
+    gColImg = gColImg.set('AreasByClass', areas);
+    gColImg = gColImg.set('ImgYear', ee.Number(gMinYear).add(ee.Number(i)));
+  }
+  
+  imgList.push(gColImg);
+}
+
+//Updated gCollection with all the classified bands
+gCollection = ee.ImageCollection(imgList);
+print("Image Collection with All Class Bands and Area Property", gCollection);
+
+
+
+//Main Map Layering section - Classification, TrueColor, NDVI
+//And exporting to drive
+for (var i = 0; i < maxNum; i++) {
+  var yr = gMinYear+i;
+  
+  //Add map layers
+  Map.addLayer(ee.Image(imgList[i]), visParams, "TRUECOLOR_"+yr, false);
+  Map.addLayer(ee.Image(imgList[i]), {bands: ['classification'], min:0, max:4, palette: paletteClasses}, "CLASSIFIED_"+yr, false);
+  Map.addLayer(ee.Image(imgList[i]), visParamsNDVI, "NDVI_"+yr, false);
+
+  //Export to drive
+  // Export.image.toDrive({
+  //   image: ee.Image(imgList[i]).select('classification'),
+  //   description: 'classified_'+yr,
+  //   scale: 30,
+  //   region: singatiExtent
+  // });
+  // Export.image.toDrive({
+  //   image: ee.Image(imgList[i]).select('NDVI'),
+  //   description: 'ndvi_'+yr,
+  //   scale: 30,
+  //   region: singatiExtent
+  // });
+
+}
+
+
+//=========================================================================================
+//LEGENDS==================================================================================
+//=========================================================================================
+
+ 
+//Add a legend for the Classified layers  
+var classLegend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '5px 5px'
+  }
+});
+ 
+//Add title for classification legend
+classLegend.add(ui.Label({
+  value: 'Landcover\nClasses',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '10px',
+    margin: '4px',
+    }
+}));
+
+//Add style to legend's row  
+function addLegendRowClass(color, label) {
+  return ui.Panel({
+    widgets: [ui.Label({
+                style: {
+                  backgroundColor: color,
+                  margin: '4px',
+                  padding: '5px',
+
+                }
+              }), 
+              ui.Label({
+                value: label,
+                style: {
+                  margin: '4px',
+                  fontSize: '10px'
+                }
+              })],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+}
+ 
+//Iterate through the classes for landcover 
+for (var i = 0; i < paletteClasses.length; i++) {
+  classLegend.add(addLegendRowClass(paletteClasses[i], classDict[i]));
+}  
+
+//Add classification legend to the map
+Map.add(classLegend); 
+  
+//============================================
+
+ //Add a legend for NDVI layers  
+var ndviLegend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '5px 5px'
+  }
+});
+ 
+//Add title for ndvi legend
+ndviLegend.add(ui.Label({
+  value: 'NDVI',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '10px',
+    margin: '4px',
+    }
+}));
+  
+//Create gradient image as thumbnail to the ndvi legend panel
+var ndviRangeImg = ui.Thumbnail({
+  image: ee.Image.pixelLonLat().select(0),
+  params: {
+    bbox: [0, 0, 1, 0.1],
+    dimensions: '85x10',
+    palette: visParamsNDVI.palette,
+  },
+  style: {stretch: 'horizontal', margin: '0px 4px', maxHeight: '24px'},
+});
+
+//Create ndvi labels to add to the bottom of legend panel
+var ndviLabels = ui.Panel({
+  widgets: [
+    ui.Label(visParamsNDVI.min, {fontSize: '8px', margin: '4px 8px', stretch: 'horizontal'}),
+    ui.Label(visParamsNDVI.max, {fontSize: '8px', margin: '4px 8px'})
+  ],
+  layout: ui.Panel.Layout.flow('horizontal')
+});
+
+ndviLegend.add(ui.Panel([ndviRangeImg, ndviLabels]));
+
+//Add ndvi legend to the map
+Map.add(ndviLegend); 
+
+
+//=========================================================================================
+//CHARTS===================================================================================
+//=========================================================================================
+
+
+//Create panel for charting
+var panel = ui.Panel({style: {width: '500px'}})
+    .add(ui.Label('Singati, Nepal - Time-Series Summer Vegetation Charts'));
+
+
+//Forest classification to chart
+var forestChangeChart = ui.Chart.image.seriesByRegion(gCollection.select(classDict[3]), singatiExtent, 
+                       ee.Reducer.sum(), classDict[3], 30, 'system:time_start')
+                      .setChartType('AreaChart')
+                      .setOptions({
+                          colors: [paletteClasses[3]],
+                          legend: {position: 'none'},
+                          title: 'Singati Forest Change - Summer 2013-2019',
+                          hAxis: {title: 'Date', format: 'YYYY-MMM', gridlines: {count: 26}},
+                          vAxis: {title: 'Count of Forest Pixels \n(Area = Px*30m*30m)'},
+                          lineWidth: 1,
+                          pointSize: 3,
+                      });
+
+//Add chart to the panel
+panel.widgets().set(2, forestChangeChart);
+
+
+//NDVI to chart
+var ndviChangeChart = ui.Chart.image.seriesByRegion(gCollection, singatiExtent, 
+                       ee.Reducer.mean(), 'NDVI', 30, 'system:time_start')
+                      .setChartType('AreaChart')
+                      .setOptions({
+                          colors: [paletteClasses[3]],
+                          legend: {position: 'none'},
+                          title: 'Singati NDVI Mean - Summer 2013-2019',
+                          hAxis: {title: 'Date', format: 'YYYY-MMM', gridlines: {count: 26}},
+                          vAxis: {title: 'NDVI'},
+                          lineWidth: 1,
+                          pointSize: 3,
+                      });
+         
+//Add chart to panel                      
+panel.widgets().set(2, ndviChangeChart);
+
+//Add panel to the root
+ui.root.add(panel);
+
+
+//=============================
