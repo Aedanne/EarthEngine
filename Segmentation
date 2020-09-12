@@ -1,0 +1,893 @@
+var dem = ee.Image("USGS/SRTMGL1_003"),
+    roi = 
+    /* color: #d63000 */
+    /* shown: false */
+    ee.FeatureCollection(
+        [ee.Feature(
+            ee.Geometry.Point([86.72192082519531, 27.84834667224366]),
+            {
+              "system:index": "0"
+            })]);
+            
+//Training polygons
+var khumbuTrain = ee.FeatureCollection("users/Charisse_Hanson/LandcoverTrainingPolygons2");
+print('>>>>>>>>>>khumbu train', khumbuTrain);
+
+
+var extent = ee.FeatureCollection(
+        [ee.Feature(
+            ee.Geometry.Polygon(
+                [[[86.53302314798783, 28.023956618036586],
+                  [86.53302314798783, 27.5403943025769],
+                  [86.95050361673783, 27.5403943025769],
+                  [86.95050361673783, 28.023956618036586]]], null, false),
+            {
+              "system:index": "0"
+            })]);
+Map.addLayer(extent, {}, 'khumbu', false);
+
+//Namche Bazar
+Map.setCenter(86.71282, 27.80419);
+Map.setZoom(14);
+
+//IMPORTANT: WHEN UPDATING THE LANDCOVER TYPES - THE VALUES IN THE IMPORTS MUST ALSO BE UPDATED
+var landcoverTypes= {
+  0:  'Alpine Grassland',
+  1:  'Alpine Scrub',
+  2:  'Broadleaf Forest',
+  3:  'Conifer Forest',
+  4:  'Deciduous Forest',
+  5:  'Grass',
+  6:  'Gravel',
+ // 7:  'Mixed Forest', -- excluding, moving the other landcover types up
+ // 8:  'Urban',
+ // 9: 'Village with Culivation',
+ // 10: 'Water',
+  7:  'Urban',
+  // 8: 'Village with Culivation',
+ 8: 'Water',
+};
+
+var landcoverPalette = [
+  "7D900C", //Alpine Grassland
+  "AFD477", //Alpine Scrub
+  "36c238", //Broadleaf Forest
+  "567A1F", //Conifer Forest
+  "508e65", //Deciduous Forest
+  "ffc82d", //Grass
+  "B2C4AF", //Gravel
+  //"358868", //Mixed Forest  --- excluding for now
+  "88356D", //Urban
+  // "732A2A", //Village with Culivation
+  "73A8C3", //Water
+  ];
+
+var elevation = dem.clip(extent);
+Map.addLayer(dem, {min: 0, max: 6000, palette: ['black', 'white']}, "dem", false);
+print ('>>>>>>>>dem', dem);
+
+var slope = ee.Terrain.slope(dem).clip(extent);
+print ('>>>>>>>>slope', slope);
+Map.addLayer(slope, {min:0, max: 90}, 'slope', false);
+
+var aspect = ee.Terrain.aspect(dem).clip(extent);
+print ('>>>>>>>>aspect', aspect);
+Map.addLayer(aspect, {min:0, max: 360}, 'aspect', false);
+
+
+//Function to mask clouds for sentinel
+function maskClouds(image) {
+  var qa = image.select("QA60");
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  var no_clouds = image.updateMask(mask);  
+  
+  var cirrBand = image.select('B10').lte(60);
+  // Map.addLayer(cirrBand, {}, "cirrus");
+  no_clouds = no_clouds.updateMask(cirrBand);
+  
+  return no_clouds.clip(extent);
+}
+
+function addNDVI(img) {
+  return img.addBands(img.normalizedDifference(['B8','B4']).rename('ndvi'));
+}
+
+
+
+function addNDVINarrow(img) {
+
+// Name	Normalized Difference NIR narrow/Red 
+// Abbreviation	NDVI nar
+// Formula: 	NIRnar−red / NIRnar+red  
+  
+    return img.addBands(img.normalizedDifference(['B8A','B4']).rename('ndvi_nar'));
+}
+
+function addNDVIRededge(img) {
+  
+// Name	Normalized Difference NIR/Rededge Normalized Difference Red-Edge
+// Abbreviation	NDRE
+// Formula: 	NIR−rededge / NIR+rededge
+
+  return img.addBands(img.normalizedDifference(['B8','B5']).rename('ndvi_rededge'));
+  
+}
+
+function addNDVINarrowRededge(img) {
+  
+// Name	Normalized Difference NIRnar/Rededge Normalized Difference Red-Edge
+// Abbreviation	NDRE
+// Formula: 	NIRnar−rededge / NIRnar+rededge
+
+  return img.addBands(img.normalizedDifference(['B8A','B5']).rename('ndvi_nar_rededge'));
+  
+}
+
+function addNDVI_GB(img) {
+  
+// Name	Green-Blue NDVI
+// Abbreviation:	GBNDVI
+// Formula:	NIR−(GREEN+BLUE) / NIR+(GREEN+BLUE)  
+  
+  var blue = img.select('B2');
+  var green = img.select('B3');
+  var NIR = img.select('B8');
+  
+  var vi = (NIR.subtract(green.add(blue)))
+            .divide(NIR.add(green.add(blue))).rename('ndvi_GB');
+  return img.addBands(vi);
+  
+}
+
+function addNDVInar_GB(img) {
+  
+// Name	Green-Blue NDVI narrow
+// Abbreviation:	GBNDVI
+// Formula:	NIRnar−(GREEN+BLUE) / NIRnar+(GREEN+BLUE)  
+  
+  var blue = img.select('B2');
+  var green = img.select('B3');
+  var NIR_nar = img.select('B8A');
+  
+  var vi = (NIR_nar.subtract(green.add(blue)))
+            .divide(NIR_nar.add(green.add(blue))).rename('ndvi_nar_GB');
+  return img.addBands(vi);
+  
+}
+
+function addNDVI_GR(img) {
+  
+// Name	Green-Red NDVI
+// Abbreviation	GRNDVI
+// Formula:	NIR−(GREEN+RED) / NIR+(GREEN+RED)
+  
+  var green = img.select('B3');
+  var red = img.select('B4');
+  var NIR = img.select('B8');
+  
+  var vi = (NIR.subtract(green.add(red)))
+            .divide(NIR.add(green.add(red))).rename('ndvi_GR');
+  return img.addBands(vi);
+  
+}
+
+function addNDVInar_GR(img) {
+  
+// Name	Green-Red NDVI narrow
+// Abbreviation	GRNDVI
+// Formula:	NIRnar−(GREEN+RED) / NIRnar+(GREEN+RED)
+  
+  var green = img.select('B3');
+  var red = img.select('B4');
+  var NIR_nar = img.select('B8A');
+  
+  var vi = (NIR_nar.subtract(green.add(red)))
+            .divide(NIR_nar.add(green.add(red))).rename('ndvi_nar_GR');
+  return img.addBands(vi);
+  
+}
+
+
+function addNDVI_RB(img) {
+  
+// Name	Red-Blue NDVI
+// Abbreviation	RBNDVI
+// Formula:	NIR−(RED+BLUE) / NIR+(RED+BLUE)
+
+  
+  var blue = img.select('B2');
+  var red = img.select('B4');
+  var NIR = img.select('B8');
+  
+  var vi = (NIR.subtract(blue.add(red)))
+            .divide(NIR.add(blue.add(red))).rename('ndvi_RB');
+  return img.addBands(vi);
+  
+}
+
+function addNDVInar_RB(img) {
+  
+// Name	Red-Blue NDVI narrow
+// Abbreviation	RBNDVI
+// Formula:	NIRnar−(RED+BLUE) / NIRnar+(RED+BLUE)
+
+  
+  var blue = img.select('B2');
+  var red = img.select('B4');
+  var NIR_nar = img.select('B8A');
+  
+  var vi = (NIR_nar.subtract(blue.add(red)))
+            .divide(NIR_nar.add(blue.add(red))).rename('ndvi_nar_RB');
+  return img.addBands(vi);
+  
+}
+
+function resample10m(image) {
+  
+  var b2 = image.select('B2');
+  print('Band 2 CRS:', b2.projection().crs());
+
+  //resample and reproject the image at 10m
+  var image10m = image.resample('bilinear').reproject({
+    crs: b2.projection().crs(),
+    scale: 10
+  });
+  
+  return image10m;
+  
+}
+
+//===============================================================================
+//Test cloud cover
+// var visParams = {bands: ['B4', 'B3', 'B2'], min:0,max: 3500}; //True color
+// var original = ee.Image("COPERNICUS/S2/20180508T044659_20180508T045541_T45RVL");
+// Map.addLayer(original, visParams, 'original', false);
+// var no_cloud = maskClouds(original); 
+// Map.addLayer(no_cloud, visParams, 'no clouds', false);
+
+//================================================================================
+//================================================================================
+//Build the sentinel 2 composites function
+
+
+/* Not using this section - not building a composite, using a single image for winter and summer
+
+// function buildComposite(isSummer) {   
+  
+//   var comp = null;
+  
+//   for (var i = 2015; i <= 2019; i++) {
+    
+//     var startDate = ee.String(i+'-05-01');
+//     var endDate = ee.String(i+'-10-01');
+    
+//     if (!isSummer) {
+//       startDate = ee.String(i+'-12-01');
+//       endDate = ee.String((i+1)+'-03-01');
+//     }
+    
+//     var imgCol = ee.ImageCollection('COPERNICUS/S2')
+//           .filterDate(startDate, endDate)
+//           .filterBounds(roi)
+//           .map(maskClouds)
+//           .map(addNDVI)
+//           .map(addNDVINarrow)
+//           .map(addNDVIRededge)
+//           .map(addNDVINarrowRededge)
+//           .map(addNDVI_GB)
+//           .map(addNDVInar_GB)
+//           .map(addNDVI_GR)
+//           .map(addNDVInar_GR)
+//           .map(addNDVI_RB)
+//           .map(addNDVInar_RB);
+          
+//     // print (imgCol)      
+          
+//     if (comp === null) {
+//       comp = imgCol;
+//     } else {
+//       comp = comp.merge(imgCol);
+//     }
+//   }
+  
+//   // print (comp)
+  
+//   //take median composite of summer images
+//   comp = comp.median();
+//   // comp = comp.qualityMosaic('ndvi');
+//   return comp;
+  
+// }
+
+//Summer comp
+
+// var summerComp = buildComposite(true);
+// Map.addLayer(summerComp, visParams, 'summer comp', false);
+
+// var ndviSummer = summerComp.normalizedDifference(['B8','B4']).rename('ndvi');
+
+//Winter comp
+
+// var winterComp = buildComposite(false);
+// Map.addLayer(winterComp, visParams, 'winter comp', false);
+
+// var ndviWinter = winterComp.normalizedDifference(['B8','B4']).rename('ndvi');
+
+*/
+
+
+
+// Single image to use for winter and summer
+/* Using bilinear interpolation to resample the image to 10m for all bands */
+
+var visParams = {bands: ['B4', 'B3', 'B2'], min:300, max: 900, gamma: 0.9}
+
+var summerComp = ee.Image(ee.ImageCollection('COPERNICUS/S2')
+          .filterDate('2018-05-07', '2018-05-09')
+        // .filterDate('2018-05-27', '2018-05-29')
+          .filterBounds(roi).first());
+
+print('Original Summer', summerComp);
+Map.addLayer(summerComp, visParams, 'Original Summer', false);  
+summerComp = resample10m(summerComp);
+print('Resampled Summer', summerComp);
+Map.addLayer(summerComp, visParams, 'Resampled Summer', false);  
+
+summerComp = addNDVInar_RB(
+              addNDVI_RB(
+                addNDVInar_GR(
+                  addNDVI_GR(
+                    addNDVInar_GB( 
+                      addNDVI_GB(
+                        addNDVINarrowRededge(
+                          addNDVIRededge(
+                            addNDVINarrow(
+                              addNDVI(
+                                maskClouds(summerComp)
+                              ))))))))));
+          
+var winterComp = ee.Image(ee.ImageCollection('COPERNICUS/S2')
+          .filterDate('2019-02-11', '2019-02-13')
+          .filterBounds(roi).first());
+
+print('Original Winter', winterComp);
+Map.addLayer(winterComp, visParams, 'Original Winter', false);  
+winterComp = resample10m(winterComp);
+print('Resampled Winter', winterComp);    
+Map.addLayer(winterComp, visParams, 'Resampled Winter', false);  
+          
+winterComp = addNDVInar_RB(
+              addNDVI_RB(
+                addNDVInar_GR(
+                  addNDVI_GR(
+                    addNDVInar_GB( 
+                      addNDVI_GB(
+                        addNDVINarrowRededge(
+                          addNDVIRededge(
+                            addNDVINarrow(
+                              addNDVI(winterComp)
+                              )))))))));       
+
+
+//Mask winter image with summer image for land area
+winterComp = winterComp.updateMask(summerComp.select('B4'));
+
+
+//add elevation, slope, aspect
+summerComp = summerComp.addBands([elevation, slope, aspect]);
+winterComp = winterComp.addBands([elevation, slope, aspect]);
+
+
+//Function to mask by elevation for sentinel
+// function mask5500Elevation(image) {
+//   var elev = image.select('elevation').lte(5500);
+//   image = image.updateMask(elev);
+//   return image;
+// }
+
+// //Cap at elevation = 5500
+// summerComp = mask5500Elevation(summerComp);
+// winterComp = mask5500Elevation(winterComp);
+
+
+
+
+var visParamsSummer = {
+  bands: ['B4', 'B3', 'B2'], 
+  min: [150, 300, 500],
+  max: [2300, 2200, 2300],
+  
+}; 
+Map.addLayer(summerComp, visParamsSummer, 'summer');
+
+var visParamsWinter = {
+  bands: ['B4', 'B3', 'B2'], 
+  min: [150, 300, 500],
+  max: [2300, 2200, 2300],
+  
+}; 
+Map.addLayer(winterComp, visParamsWinter, 'winter', false);
+
+Map.setZoom(14);
+
+//=========================================================================
+//Shadow mask? Not yet applied ==================================
+// var image = winterComp
+// Map.centerObject(image)
+// var mask_shadow = cld.hollstein_S2(['shadow'])(image)
+// Map.addLayer(mask_shadow, visParamsWinter, "Winter shadow masked", false);
+
+
+
+
+//Look at ndvi data - Summer
+Map.addLayer(summerComp.select(['ndvi']), {bands: ['ndvi'], min:-1, max: 1, palette: ['brown','yellow','green']}, 'summer_ndvi', false);
+
+//Look at ndvi data - Winter
+Map.addLayer(winterComp.select(['ndvi']), {bands: ['ndvi'], min:-1, max: 1, palette: ['brown','yellow','green']}, 'winter_ndvi', false);
+
+
+
+
+//Get NDVI diff between summer to winter, and winter to summer, and save as bands to summerComp
+var ndvi_s_w = summerComp.select(['ndvi']).subtract(winterComp.select(['ndvi'])).rename("ndvi_diff_s_w")
+summerComp = summerComp.addBands(ndvi_s_w);
+summerComp = summerComp.addBands(winterComp.select('ndvi').rename('ndvi_winter')); //add winter ndvi values to summer image
+
+var ndvi_w_s = winterComp.select(['ndvi']).subtract(summerComp.select(['ndvi'])).rename("ndvi_diff_w_s")
+summerComp = summerComp.addBands(ndvi_w_s);
+
+
+Map.addLayer(summerComp.select(['ndvi_diff_w_s']), {bands: ['ndvi_diff_w_s'], min:-0.7, max: 0.3, palette: ['red','orange','white']}, 'ndvi_diff_w_s', false);
+Map.addLayer(summerComp.select(['ndvi_diff_s_w']), {bands: ['ndvi_diff_s_w'], min:-0.5, max: 0.7, palette: ['red','orange','white']}, 'ndvi_diff_s_w', false);
+
+
+
+
+//Final image with all the bands
+print('winter comp', winterComp);
+print('summer comp', summerComp);
+
+
+//Bands to display in the map
+Map.addLayer(summerComp.select('B4'), {min: 500, max: 2000, palette: ['white','red']}, "SUMMER: B4 - Red", false);
+Map.addLayer(summerComp.select('B5'), {min: 500, max: 2000, palette: ['white','red']}, "SUMMER: B5 - Red Edge 1", false);
+Map.addLayer(summerComp.select('B8'), {min: 1500, max: 4000, palette: ['white','red']}, "SUMMER: B8 - NIR", false);
+Map.addLayer(summerComp.select('B8A'), {min: 2500, max: 5000, palette: ['white','red']}, "SUMMER: B8A - NIR Narr / Red-edge 4", false);
+Map.addLayer(summerComp.select('B10'), {min: 0, max: 60, palette: ['white','red']}, "SUMMER: B10 - Cirrus", false);
+Map.addLayer(summerComp.select('ndvi_nar'), {min: -1, max: 1, palette: ['brown','yellow','green']}, "SUMMER: ndvi_nar", false);
+Map.addLayer(summerComp.select('ndvi_rededge'), {min: -1, max: 1, palette: ['brown','yellow','green']}, "SUMMER: ndvi_rededge", false);
+Map.addLayer(summerComp.select('ndvi_nar_rededge'), {min: -1, max: 1, palette: ['brown','yellow','green']}, "SUMMER: ndvi_nar_rededge", false);
+
+
+Map.addLayer(winterComp.select('B4'), {min: 500, max: 2000, palette: ['white','red']}, "Winter: B4 - Red", false);
+Map.addLayer(winterComp.select('B5'), {min: 500, max: 2000, palette: ['white','red']}, "Winter: B5 - Red Edge 1", false);
+Map.addLayer(winterComp.select('B8'), {min: 1500, max: 4000, palette: ['white','red']}, "Winter: B8 - NIR", false);
+Map.addLayer(winterComp.select('B8A'), {min: 2500, max: 5000, palette: ['white','red']}, "Winter: B8A - NIR Narr / Red-edge 4", false);
+Map.addLayer(winterComp.select('B10'), {min: 0, max: 60, palette: ['white','red']}, "Winter: B10 - Cirrus", false);
+Map.addLayer(winterComp.select('ndvi_nar'), {min: -1, max: 1, palette: ['brown','yellow','green']}, "Winter: ndvi_nar", false);
+Map.addLayer(winterComp.select('ndvi_rededge'), {min: -1, max: 1, palette: ['brown','yellow','green']}, "Winter: ndvi_rededge", false);
+Map.addLayer(winterComp.select('ndvi_nar_rededge'), {min: -1, max: 1, palette: ['brown','yellow','green']}, "Winter: ndvi_nar_rededge", false);
+
+
+
+//================================================================================
+//================================================================================
+//Segmentation
+
+
+/*Available bands
+
+  "B2", 
+  "B3", 
+  "B4", 
+  "B5", 
+  "B6", 
+  "B7",  
+  "B8", 
+  "B8A", 
+  "B11", 
+  "B12", 
+  
+  "ndvi", 
+  "ndvi_diff_s_w", 
+  "ndvi_diff_w_s",
+  "ndvi_nar"
+  "ndvi_rededge"
+  "ndvi_nar_rededge"
+  "ndvi_GB"
+  "ndvi_nar_GB"
+  "ndvi_GR"
+  "ndvi_nar_GR"
+  "ndvi_RB"
+  "ndvi_nar_RB"
+
+  "elevation"
+  "slope"
+  "aspect"
+
+*/
+
+// var bands = ["B2", "B3", "B4", "B5", "B8A", "ndvi", "ndvi_winter"]; //With NDVI, red-edge (5), Nir-narr
+
+var bands = ["B2", "B3", "B4", "B8", "B8A", "ndvi_nar"]; 
+
+
+// var bands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A"]; //Visual, red-edge, NIR nar and NIR wide
+//var bands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A", "ndvi"]; //With NDVI
+// var bands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A", "B11", "B12"];
+//var bands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A", "B11", "B12", "ndvi"];
+// var bands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A", "B11", "B12", "ndvi", "ndvi_diff_s_w"];
+// var bands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A", "B11", "B12", "ndvi", "ndvi_diff_s_w", "ndvi_diff_w_s"];
+
+//var meanClusterBands = ["B2_mean", "B3_mean", "B4_mean", "B5_mean", "B6_mean", "B7_mean",  "B8_mean", "B8A_mean", "ndvi_mean", "clusters"];
+//var clusterBands = ["B2", "B3", "B4", "B5", "B6", "B7",  "B8", "B8A", "ndvi", "clusters"];
+
+var meanClusterBands = ["B2_mean", "B3_mean", "B4_mean", "B8_mean", "B8A_mean", "ndvi_nar_mean", "clusters"];
+var clusterBands = ["B2", "B3", "B4", "B8", "B8A", "ndvi_nar", "clusters"];
+
+
+var img = summerComp;
+img = ee.Image(img).clip(extent).divide(255).select(bands)
+
+// Map.addLayer(img, {gamma: 0.8}, 'summer_comp', false)
+print(img)
+ 
+//Superpixel seed location spacing, in pixel 
+var seedGrid = ee.Algorithms.Image.Segmentation.seedGrid(16);
+
+//Simple non-iterative clustering - calculates the per-cluster means per band
+//Iteration 0
+var snic = ee.Algorithms.Image.Segmentation.SNIC({
+  image: img, 
+  size: 16,
+  compactness: 8,
+  connectivity: 8,
+  neighborhoodSize: 32,
+  seeds: seedGrid
+}).select(meanClusterBands, clusterBands)
+
+print(snic)
+
+
+var clusters = snic.select('clusters')
+Map.addLayer(clusters.randomVisualizer(), {}, 'clusters', false)
+//Map.addLayer(snic, {bands: ['B4', 'B3', 'B2'], min:0, max:10, gamma: 1.0}, 'means')
+Map.addLayer(snic, {bands: ['B4', 'B3', 'B2'], min:0, max:10, gamma: 1.0}, 'SNIC segmentation (means)')
+
+
+//Compute per-cluster stdDev.
+var stdDev = img.addBands(clusters).reduceConnectedComponents(ee.Reducer.stdDev(), 'clusters', 256)
+Map.addLayer(stdDev, {min:0, max:0.5}, 'StdDev', false)
+
+//Area, Perimeter
+var area = ee.Image.pixelArea().addBands(clusters).reduceConnectedComponents(ee.Reducer.sum(), 'clusters', 256)
+Map.addLayer(area, {min:50000, max: 500000}, 'Cluster Area', false)
+
+//Reduce neighborhood to min max 
+var minMax = clusters.reduceNeighborhood(ee.Reducer.minMax(), ee.Kernel.square(1));
+var perimeterPixels = minMax.select(0).neq(minMax.select(1)).rename('perimeter');
+Map.addLayer(perimeterPixels, {min: 0, max: 1}, 'Perimeter Pixels', false, 0.2);
+
+var perimeter = perimeterPixels.addBands(clusters)
+    .reduceConnectedComponents(ee.Reducer.sum(), 'clusters', 256);
+Map.addLayer(perimeter, {min: 100, max: 400}, 'Perimeter Size', false);
+
+var objectPropertiesImage = ee.Image.cat([
+  snic.select(bands),
+  stdDev,
+  area,
+  perimeter
+]).float();
+
+
+//Iteration 1==============================================================
+//Resegment the segmented image to form a higher level cluster
+// var seedGrid1 = ee.Algorithms.Image.Segmentation.seedGrid(16);
+// var snic1 = ee.Algorithms.Image.Segmentation.SNIC({
+//   image: snic, 
+//   size: 16,
+//   compactness: 8,
+//   connectivity: 8,
+//   neighborhoodSize: 64,
+//   seeds: seedGrid1
+// }).select(meanClusterBands, clusterBands)
+
+// print(snic1)
+
+
+// var clusters1 = snic1.select('clusters')
+// Map.addLayer(clusters1.randomVisualizer(), {}, 'clusters', false)
+// //Map.addLayer(snic, {bands: ['B4', 'B3', 'B2'], min:0, max:10, gamma: 1.0}, 'means1')
+// Map.addLayer(snic1, {bands: ['B5', 'B3', 'B2'], min:0, max:10, gamma: 1.0}, 'means1')
+
+// //Reduce neighborhood to min max 
+// var minMax1 = clusters1.reduceNeighborhood(ee.Reducer.minMax(), ee.Kernel.square(1));
+// var perimeterPixels1 = minMax1.select(0).neq(minMax1.select(1)).rename('perimeter');
+// Map.addLayer(perimeterPixels1, {min: 0, max: 1}, 'Perimeter Pixels1', true, 0.2);
+
+
+
+//======================================================================
+//TODO: Training a classifier===========================================
+
+
+//IMPORTANT: WHEN UPDATING THE LANDCOVER TYPES - THE VALUES IN THE IMPORTS MUST ALSO BE UPDATED
+var landcoverTypes1 = {
+  0:  'Water',
+  1:  'Urban',
+  2:  'Forest',
+  3:  'Bare_Soil',
+  4:  'Clouds',
+};
+
+var landcoverPalette1 = [
+  "73A8C3", //Water
+  "88356D", //Urban
+  "36c238", //Broadleaf Forest
+  "93731a", //Soil
+  "B2C4AF", //Cloud
+  ];
+
+var empty = ee.Image().byte();
+var khumbuTrainVis = empty.paint({
+  featureCollection: khumbuTrain,
+  color: 'Landcover',
+});
+Map.addLayer(khumbuTrainVis, {min:1, max: 11, palette: landcoverPalette}, "training polygons original", false );
+
+
+//Use segmented image for classification
+//var input = objectPropertiesImage;
+
+//Use orignal image for classification
+var input = summerComp;
+
+//Merged training feature colection from training polygons
+var mergedFC = Water
+                .merge(Forest)
+                .merge(Clouds)
+                .merge(Bare_Soil)
+                .merge(Urban)
+                ;
+
+print("mergedFC", mergedFC);
+
+//split training to validation 50%
+var withRandom = mergedFC.randomColumn('random',1);
+var split = 0.5; 
+var trainingFC = withRandom.filter(ee.Filter.lt('random', split));
+var validationFC = withRandom.filter(ee.Filter.gte('random', split));
+
+var trainingDataSet = input.select(bands).sampleRegions({
+  collection: trainingFC,
+  properties: ['Landcover'],
+  scale: 20,
+  tileScale: 4
+});
+
+// print("trainingDataSet", trainingDataSet);
+// Map.addLayer(trainingDataSet, {}, "trainingDataSet");
+
+// Make a Random Forest classifier and train it.
+var classifier = ee.Classifier.smileRandomForest(30, null, 1, 0.5, null, 1).train({
+      features: trainingDataSet,
+      classProperty: 'Landcover',
+      inputProperties: bands
+    });
+
+// Classify the input imagery.
+var classified = input.classify(classifier);
+Map.addLayer(classified, {min: 0, max: 4, palette: landcoverPalette1}, 'Per-pixel: classified');
+
+
+var trainAccuracy = classifier.confusionMatrix();
+print('Per-pixel: Resubstitution error matrix: ', trainAccuracy);
+print('Per-pixel: Training overall accuracy: ', trainAccuracy.accuracy());
+print('Per-pixel: Training kappa: ', trainAccuracy.kappa());
+
+
+//Validation
+
+var validationDataSet = classified.sampleRegions({
+  collection: validationFC,
+  properties: ['Landcover'],
+  scale: 20
+});
+
+var valAccuracy = validationDataSet.errorMatrix('Landcover', 'classification');
+print('Per-pixel: Resubstitution error matrix: ', valAccuracy);
+print('Per-pixel: Validation overall accuracy: ', valAccuracy.accuracy());
+print('Per-pixel: Validation kappa: ', valAccuracy.kappa());
+
+
+
+//Segmentation-based classification ======================================
+
+//Use segmented image for classification
+var input = objectPropertiesImage;
+
+var trainingDataSet = input.select(bands).sampleRegions({
+  collection: trainingFC,
+  properties: ['Landcover'],
+  scale: 20,
+  tileScale: 4
+});
+
+// print("trainingDataSet", trainingDataSet);
+// Map.addLayer(trainingDataSet, {}, "trainingDataSet");
+
+// Make a Random Forest classifier and train it.
+var classifier = ee.Classifier.smileRandomForest(30, null, 1, 0.5, null, 1).train({
+      features: trainingDataSet,
+      classProperty: 'Landcover',
+      inputProperties: bands
+    });
+
+// Classify the input imagery.
+var classified = input.classify(classifier);
+Map.addLayer(classified, {min: 0, max: 4, palette: landcoverPalette1}, 'Object-based: classified');
+
+
+var trainAccuracy = classifier.confusionMatrix();
+print('Object-based: Resubstitution error matrix: ', trainAccuracy);
+print('Object-based: Training overall accuracy: ', trainAccuracy.accuracy());
+print('Object-based: Training kappa: ', trainAccuracy.kappa());
+
+
+//Validation
+
+var validationDataSet = classified.sampleRegions({
+  collection: validationFC,
+  properties: ['Landcover'],
+  scale: 20
+});
+
+var valAccuracy = validationDataSet.errorMatrix('Landcover', 'classification');
+print('Object-based: Resubstitution error matrix: ', valAccuracy);
+print('Object-based: Validation overall accuracy: ', valAccuracy.accuracy());
+print('Object-based: Validation kappa: ', valAccuracy.kappa());
+
+
+
+
+
+
+//Visualize====================================================
+
+//Add a legend for the Classified layers  
+var classLegend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '5px 5px'
+  }
+});
+ 
+//Add title for classification legend
+classLegend.add(ui.Label({
+  value: 'Landcover\nClasses',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '10px',
+    margin: '4px',
+    }
+}));
+
+//Add style to legend's row  
+function addLegendRowClass(color, label) {
+  return ui.Panel({
+    widgets: [ui.Label({
+                style: {
+                  backgroundColor: color,
+                  margin: '4px',
+                  padding: '5px',
+
+                }
+              }), 
+              ui.Label({
+                value: label,
+                style: {
+                  margin: '4px',
+                  fontSize: '10px'
+                }
+              })],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+}
+ 
+//Iterate through the classes for landcover 
+for (var i = 0; i < landcoverPalette1.length; i++) {
+  classLegend.add(addLegendRowClass(landcoverPalette1[i], landcoverTypes1[i]));
+}  
+
+//Add classification legend to the map
+Map.add(classLegend); 
+
+
+//============================================================================
+//Histograms
+
+//Define root panel for histograms
+var panel = ui.Panel({style: {width: '550px'}})
+    .add(ui.Label('NDVI Analysis'));
+    
+var ndviHistSummer = ui.Chart.image.histogram(summerComp.select(['ndvi']), extent, 20)
+    .setSeriesNames(['ndvi_summer'])
+    .setOptions({
+      title: 'ndvi - summer',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'green'}
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(4, ndviHistSummer);    
+
+var ndviHistWinter = ui.Chart.image.histogram(winterComp.select(['ndvi']), extent, 20)
+    .setSeriesNames(['ndvi_winter'])
+    .setOptions({
+      title: 'ndvi - winter',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'green'}
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(4, ndviHistWinter);   
+
+var ndviHistDiffSW = ui.Chart.image.histogram(summerComp.select(['ndvi_diff_s_w']), extent, 20)
+    .setSeriesNames(['ndvi_diff_s_w'])
+    .setOptions({
+      title: 'ndvi diff - summer to winter',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'green'}
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(4, ndviHistDiffSW);  
+
+var ndviHistDiffWS = ui.Chart.image.histogram(summerComp.select(['ndvi_diff_w_s']), extent, 20)
+    .setSeriesNames(['ndvi_diff_w_s'])
+    .setOptions({
+      title: 'ndvi diff - winter to summer',
+      fontSize: 10,
+      hAxis: {title: 'NDVI'},
+      vAxis: {title: 'count of NDVI'},
+      series: {
+        0: {color: 'green'}
+      },
+      bestEffort: true,  
+      maxPixels: 1e9 
+      
+    });
+
+// Display the histogram.
+panel.widgets().set(4, ndviHistDiffWS);  
+
+ui.root.add(panel);
